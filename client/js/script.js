@@ -1,6 +1,9 @@
 const VERSION = "0.10.28.21011";
 
-const CROWDIN_URL = "https://crowdin.com/backend/download/project/dyson-sphere-program/";
+const SERVER_PROTOCOL = "http";
+const SERVER_HOST = "127.0.0.1";
+const SERVER_PORT = 3000;
+const SERVER_ENDPOINT = "/download";
 
 class Locale {
   constructor(name, folder, latin) {
@@ -53,7 +56,7 @@ const TRANSLATION_FIX = {
   "base_CutsceneBGM0_0": "Musics/df-cutscene-en",
 }
 
-let SELECTED_LOCALE = 'en';
+let SELECTED_LOCALE = "en";
 
 // populate the drop-down list
 function initLocales() {
@@ -74,11 +77,9 @@ function updateLocale(select) {
 }
 
 async function downloadTranslation() {
+  clearErrors();
   // initialize zip
   let translationZip = new JSZip();
-
-  // get json file directly from crowdin project -- NOT WORKING YET
-  //let crowdinZip = await downloadCrowdinZip();
 
   // generate header.txt file and add to the zip
   translationZip.file("Header.txt", generateHeader());
@@ -87,32 +88,86 @@ async function downloadTranslation() {
   let translationsFolder = translationZip.folder(LOCALES.get(SELECTED_LOCALE).folder);
   // convert json to a map containing a blob for each file
   // then add each file in the language folder
-  convertTranslations().then(function (translationFiles) {
-    translationFiles.forEach(function (value, key) {
-      translationsFolder.file(key.concat(".txt"), value);
-    });
-    // generate and download zip
-    translationZip
-      .generateAsync({ type: "blob" }).then(function (content) {
-        saveAs(content, "translation.zip");
-      });
+  const formattedLocale = SELECTED_LOCALE.replace("_", "-");
+  let translationFilesMap;
+  // check whether user has provided a json
+  // otherwise get latest one from crowdin for selected language
+  const input = document.getElementById("FileInput");
+  const file = input.files[0];
+  let jsonData;
+  try {
+    if (file != null) {
+      jsonData = await getJsonData(file);
+    }
+    else {
+      jsonData = await getCrowdinJson(formattedLocale);
+    }
+    // generate translation map from json
+    translationFilesMap = createFilesFromJson(jsonData);
+  } catch (error) {
+    errorHandler(error);
+  }
+  // create separate txt files from translation map
+  translationFilesMap.forEach(function (value, key) {
+    translationsFolder.file(key.concat(".txt"), value);
   });
+  // generate and download zip
+  translationZip
+    .generateAsync({ type: "blob" })
+    .then(function (content) {
+      saveAs(content, `dsp-translation-${formattedLocale}.zip`);
+    })
+    .catch(function (error) {
+      errorHandler(error);
+    });;
 }
 
-async function downloadCrowdinZip() {
-  let translationUrl = CROWDIN_URL.concat(SELECTED_LOCALE.replace("_", "-")).concat(".zip");
+async function getCrowdinJson(locale) {
   try {
-    const response = await fetch(translationUrl, {
-      mode: "no-cors",
-      headers: {
-        "Content-Type": "application/zip"
-      }
-    });
-    const crowdinZip = await response.blob();
-    return crowdinZip;
+    const url = `${SERVER_PROTOCOL}://${SERVER_HOST}:${SERVER_PORT}${SERVER_ENDPOINT}?locale=${locale}`;
+
+    const response = await fetch(url);
+
+    if (!response.ok) {
+      reject(new Error(`Server error: ${response.status}`));
+    }
+
+    const zipBlob = await response.blob();
+
+    const crowdinZip = await new JSZip().loadAsync(zipBlob);
+    const jsonFile = await crowdinZip.file("DysonSphereProgram_The_Dark_Fog.json").async("string");
+
+    return jsonFile;
+
   } catch (error) {
-    console.error(`Download error: ${error.message}`);
+    reject(new Error(`Fetch error: ${error.message}`));
   }
+}
+
+async function getJsonData(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+
+    if (!file) {
+      reject(new Error("No file selected"));
+      return;
+    }
+
+    if (!file.name.toLowerCase().endsWith('.json')) {
+      reject(new Error("Wrong file type (expected json)"));
+      return;
+    }
+
+    reader.onload = function () {
+      resolve(reader.result);
+    };
+
+    reader.onerror = function () {
+      reject(new Error("File reading failed"));
+    };
+
+    reader.readAsText(file);
+  });
 }
 
 function generateHeader() {
@@ -145,40 +200,17 @@ dictionary=3
   return headerElements.join("\n");
 }
 
-async function convertTranslations() {
-  return new Promise((resolve, reject) => {
-    const input = document.getElementById("FileInput");
-    const file = input.files[0];
-    const reader = new FileReader();
-
-    if (!file) {
-      reject(new Error("No file selected"));
-      return;
-    }
-
-    if (!file.name.toLowerCase().endsWith('.json')) {
-      reject(new Error("Wrong file type (expected json)"));
-      return;
-    }
-
-    reader.onload = function () {
-      const jsonString = reader.result;
-      const jsonData = JSON.parse(jsonString);
-      resolve(createFilesFromJson(jsonData));
-    };
-
-    reader.onerror = function () {
-      reject(new Error("Error reading file"));
-    };
-
-    reader.readAsText(file);
-  });
-}
-
-function createFilesFromJson(data) {
+function createFilesFromJson(jsonString) {
   let filename = null;
   let fileContent = "";
   let translationFiles = new Map();
+  let jsonData;
+  try {
+    jsonData = JSON.parse(jsonString);
+  } catch (error) {
+    errorHandler(new Error("JSON parsing: ".concat(error)));
+    return;
+  }
 
   function closeResetFile(newFilename) {
     const utf16leContent = new TextEncoder("utf-16le").encode(fileContent);
@@ -188,14 +220,10 @@ function createFilesFromJson(data) {
     fileContent = "";
   }
 
-  const keysArray = Object.keys(data);
-
-  Object.keys(data).forEach(function (key) {
-    let file, original, questionMark, num;
-
-    let value = data[key].replace(/\n/g, "\\n").replace(/\r/g, "\\r");
-
+  Object.entries(jsonData).forEach(([key, value]) => {
+    value = value.replace(/\n/g, "\\n").replace(/\r/g, "\\r");
     let props = key.split("_");
+    let file, original, questionMark, num;
 
     if (props.length === 3) {
       [file, original, num] = props;
@@ -226,4 +254,18 @@ function createFilesFromJson(data) {
   closeResetFile(filename);
 
   return translationFiles;
+}
+
+function errorHandler(error) {
+  console.log(error);
+  updateErrors(error);
+}
+
+function clearErrors() {
+  updateErrors("");
+}
+
+function updateErrors(error) {
+  const errorDisplay = document.getElementById("ErrorDisplay");
+  errorDisplay.textContent = error;
 }
